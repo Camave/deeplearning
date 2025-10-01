@@ -149,17 +149,17 @@ acc = accuracy_score(y_true_test, y_pred)
 print(f"Test Accuracy: {acc * 100:.2f}%")
 
 
-# # ---- TEST SUR LA PREMIÈRE IMAGE ----
-# for i in range(0,20):
-#     image = X_test[:, i].reshape(-1, 1)  # 64x1
-#     true_label = y_true_test[i]  # étiquette réelle
+# ---- TEST SUR LA PREMIÈRE IMAGE ----
+for i in range(0,20):
+    image = X_test[:, i].reshape(-1, 1)  # 64x1
+    true_label = y_true_test[i]  # étiquette réelle
 
-#     # Affichage
-#     plt.imshow(image.reshape(8, 8), cmap='gray')
-#     plt.title(f"Label réel : {true_label}")
-#     plt.axis('off')
-#     plt.show()
+    # Affichage
+    plt.imshow(image.reshape(8, 8), cmap='gray')
+    plt.title(f"Label réel : {true_label}")
+    plt.axis('off')
+    plt.show()
 
-#     # Prédiction
-#     pred = Predict(image, params)
-#     print("Prédiction du réseau :", int(pred), )
+    # Prédiction
+    pred = Predict(image, params)
+    print("Prédiction du réseau :", int(pred), )
