@@ -9,13 +9,10 @@ from tqdm import tqdm
 class GPTEmbedding(nn.Module):
     def __init__(self, vocab_size, embed_dim, max_seq_len):
         super().__init__()
-        # TODO: définir token embedding + positional embedding
-        self.embedding_tok = nn.Embedding(vocab_size,embed_dim)
-        self.embedding_pos = nn.Embedding(max_seq_len,embed_dim)
-
+        self.embedding_tok = nn.Embedding(vocab_size, embed_dim)
+        self.embedding_pos = nn.Embedding(max_seq_len, embed_dim)
 
     def forward(self, x):
-        # TODO: renvoyer embeddings + positions
         batch_size, seq_length = x.size()
         token_emb = self.embedding_tok(x)
         pos = torch.arange(seq_length, device=x.device).unsqueeze(0).expand(batch_size, seq_length)
@@ -31,46 +28,38 @@ class SelfAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
 
-        # Projections linéaires
         self.Q = nn.Linear(embed_dim, embed_dim)
         self.K = nn.Linear(embed_dim, embed_dim)
         self.V = nn.Linear(embed_dim, embed_dim)
         self.out = nn.Linear(embed_dim, embed_dim)
 
-        # Dropout
         self.attn_dropout = nn.Dropout(dropout)
         self.resid_dropout = nn.Dropout(dropout)
 
-        # Mask causal (pré-calculé)
         mask = torch.triu(torch.ones(max_seq_len, max_seq_len), diagonal=1).bool()
         self.register_buffer("mask", mask)
 
     def forward(self, x):
-        B, S, E = x.shape  # batch_size, seq_len, embed_dim
-
-        # Projections linéaires
-        Q = self.Q(x)  # [B, S, E]
+        B, S, E = x.shape
+        Q = self.Q(x)
         K = self.K(x)
         V = self.V(x)
 
-        # Split en têtes
         Q = Q.reshape(B, S, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
         K = K.reshape(B, S, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
         V = V.reshape(B, S, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
 
-        # Calcul des scores d'attention
         scores = Q @ K.transpose(-2, -1) / math.sqrt(self.head_dim)
         scores = scores.masked_fill(self.mask[:S, :S], float('-inf'))
 
         p = F.softmax(scores, dim=-1)
-        p = self.attn_dropout(p)  # dropout sur softmax
+        p = self.attn_dropout(p)
 
         output_head = p @ V
         output = output_head.permute(0, 2, 1, 3).reshape(B, S, E)
 
         output = self.out(output)
-        output = self.resid_dropout(output)  # dropout sur la sortie
-
+        output = self.resid_dropout(output)
         return output
 
 
@@ -86,9 +75,7 @@ class TransformerBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        # Attention + résidu
         x = x + self.attention(self.norm1(x))
-        # FeedForward + résidu
         x = x + self.dropout(self.fc2(self.activation(self.fc1(self.norm2(x)))))
         return x
 
@@ -100,123 +87,134 @@ class MiniGPT(nn.Module):
         self.transformer_blocks = nn.ModuleList(
             [TransformerBlock(embed_dim, num_heads, ff_hidden_dim, max_seq_len, dropout) for _ in range(num_layers)]
         )
-        self.ln_f = nn.LayerNorm(embed_dim)  # LayerNorm final
+        self.ln_f = nn.LayerNorm(embed_dim)
         self.proj = nn.Linear(embed_dim, vocab_size, bias=False)
         self.proj.weight = self.emb.embedding_tok.weight
-
 
     def forward(self, x):
         x = self.emb(x)
         for block in self.transformer_blocks:
             x = block(x)
-        x = self.ln_f(x)  # Appliquer LayerNorm final
+        x = self.ln_f(x)
         x = self.proj(x)
         return x
 
-def train(model, dataloader, optimizer, criterion, device):
-    model.train()
-    num_epochs = 1  # ou plus
-    for epoch in range(num_epochs):
-        for batch in tqdm(dataloader):
-            inputs, targets = batch
-            # TODO: envoyer sur device
-            inputs = inputs.to(device)
-            targets = targets.to(device)
-            # TODO: forward
+
+# ---- ✅ FONCTION EVALUATION ----
+def evaluate(model, dataloader, criterion, device):
+    model.eval()
+    total_loss = 0
+    with torch.no_grad():
+        for inputs, targets in dataloader:
+            inputs, targets = inputs.to(device), targets.to(device)
             logits = model(inputs)
-            # TODO: calcul loss
+            loss = criterion(logits.view(-1, logits.size(-1)), targets.view(-1))
+            total_loss += loss.item()
+    avg_loss = total_loss / len(dataloader)
+    perplexity = torch.exp(torch.tensor(avg_loss))
+    return avg_loss, perplexity.item()
+
+
+# ---- ✅ BOUCLE TRAIN + VAL ----
+def train(model, train_loader, val_loader, optimizer, criterion, device, num_epochs=5):
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0
+        for inputs, targets in tqdm(train_loader):
+            inputs, targets = inputs.to(device), targets.to(device)
+            logits = model(inputs)
             loss = criterion(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
-            # TODO: backward + step
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            total_loss += loss.item()
 
+        train_loss = total_loss / len(train_loader)
+        train_ppl = torch.exp(torch.tensor(train_loss)).item()
+
+        val_loss, val_ppl = evaluate(model, val_loader, criterion, device)
+
+        print(
+            f"Epoch {epoch+1}: "
+            f"Train Loss={train_loss:.4f}, Train PPL={train_ppl:.2f} | "
+            f"Val Loss={val_loss:.4f}, Val PPL={val_ppl:.2f}"
+        )
+
+
+# ---- DATASET ----
 def build_dataset(encoded_text, seq_length):
-    inputs = []
-    targets = []
+    inputs, targets = [], []
     for i in range(len(encoded_text) - seq_length):
         x = encoded_text[i : i + seq_length]
-        y = encoded_text[i+1 : i + seq_length + 1]  # décalé d’un cran
+        y = encoded_text[i+1 : i + seq_length + 1]
         inputs.append(x)
         targets.append(y)
-    # Convertir en tenseurs
     X = torch.tensor(inputs, dtype=torch.long)
     Y = torch.tensor(targets, dtype=torch.long)
     return X, Y
 
+
 def generate(model, start_tokens, max_new_tokens, char2idx, idx2char, device, temperature=1.0):
-    """
-    Génère du texte à partir d'un prompt initial.
-    """
-    # 1. Mettre start_tokens dans un tenseur sur le bon device
     input = start_tokens.to(device)
-    # 2. Boucle de génération
+    max_seq_len = model.emb.embedding_pos.num_embeddings  # récupère max_seq_len du modèle
+
     for _ in range(max_new_tokens):
-        # a. Passer input dans le modèle → logits
+        # Tronquer si la séquence devient trop longue
+        if input.size(1) > max_seq_len:
+            input = input[:, -max_seq_len:]
+
         logits = model(input)
-        # b. Prendre seulement les logits du dernier token
-        logits = logits[:, -1, :]
-        # c. Appliquer la température
-        logits = logits/temperature
-        # d. Calculer probabilités avec softmax
+        logits = logits[:, -1, :] / temperature
         probs = F.softmax(logits, dim=-1)
-        # e. Échantillonner un token (ou argmax)
         next_token = torch.multinomial(probs, 1)
-        # f. Ajouter ce token à la séquence
         input = torch.cat([input, next_token], dim=1)
-    # 3. Décoder la séquence complète en texte
+
     output_text = "".join([idx2char[int(i)] for i in input[0]])
     return output_text
 
-text = open("input.txt").read()[:100000]
+
+
+# ---- MAIN ----
+text = open("input.txt").read()
 vocab = sorted(set(text))
 char2idx = {ch: i for i, ch in enumerate(vocab)}
 idx2char = {i: ch for i, ch in enumerate(vocab)}
 
 encoded = [char2idx[c] for c in text]
-
 X, Y = build_dataset(encoded, seq_length=16)
 
 vocab_size = len(vocab)
-embed_dim = 128
-num_heads = 4
-ff_hidden_dim = 256
-num_layers = 2
-max_seq_len = 32
+embed_dim = 256
+num_heads = 8
+ff_hidden_dim = 512
+num_layers = 4
+max_seq_len = 64
 dropout = 0.1
+batch_size = 32
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Training on:", device)
-model = MiniGPT(vocab_size, embed_dim, num_heads, ff_hidden_dim, num_layers, max_seq_len,dropout)
+model = MiniGPT(vocab_size, embed_dim, num_heads, ff_hidden_dim, num_layers, max_seq_len, dropout)
 model.to(device)
 
-batch_size = 2
-seq_len = max_seq_len
-num_batches = 5
-
 dataset = torch.utils.data.TensorDataset(X, Y)
-dataloader = torch.utils.data.DataLoader(dataset, batch_size=8, shuffle=True)
+
+# ✅ Split 90% train / 10% val
+train_size = int(0.9 * len(dataset))
+val_size = len(dataset) - train_size
+train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
+
+train_loader = torch.utils.data.DataLoader(train_dataset, batch_size, shuffle=True)
+val_loader = torch.utils.data.DataLoader(val_dataset, batch_size)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 criterion = nn.CrossEntropyLoss()
 
-train(model, dataloader, optimizer, criterion, device)
+train(model, train_loader, val_loader, optimizer, criterion, device, num_epochs=200)
 
-sample_inputs, sample_targets = next(iter(dataloader))
-sample_inputs, sample_targets = sample_inputs.to(device), sample_targets.to(device)
+torch.save(model.state_dict(), "shakespeare_gpt.pth")
 
-logits = model(sample_inputs)
-print(logits.shape)  # [8, 16, 61]
-
-loss = criterion(logits.view(-1, vocab_size), sample_targets.view(-1))
-
-perplexity = torch.exp(loss)
-
-encoded = [char2idx[c] for c in "hello"]
-
-start_tokens = torch.tensor([encoded], dtype=torch.long).to(device)
-
-text =generate(model, start_tokens, 5, char2idx, idx2char, device, temperature=0.7)
-print(loss)
-print(perplexity)
-print(text)
+# (Optionnel) Sauvegarder le vocabulaire
+import pickle
+with open("char_mapping.pkl", "wb") as f:
+    pickle.dump((char2idx, idx2char), f)
