@@ -215,7 +215,7 @@ model.load_state_dict(torch.load("shakespeare_gpt.pth", map_location=device))
 model.to(device)
 model.eval()  # important : mode évaluation
 
-encoded = [char2idx[c] for c in "What is your name?"]
+encoded = [char2idx[c] for c in "MENENIUS:"]
 start_tokens = torch.tensor([encoded], dtype=torch.long).to(device)
 
-print(generate(model, start_tokens, 20, char2idx, idx2char, device, temperature=0.7))
+print(generate(model, start_tokens, 50, char2idx, idx2char, device, temperature=0.7))
