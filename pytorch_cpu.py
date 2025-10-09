@@ -1,212 +1,225 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import math 
-from tqdm import tqdm
+from torch.nn import functional as F
 
+# hyperparameters
+batch_size = 64 # how many independent sequences will we process in parallel?
+block_size = 256 # what is the maximum context length for predictions?
+max_iters = 5000
+eval_interval = 500
+learning_rate = 3e-4
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+eval_iters = 200
+n_embd = 384
+n_head = 6
+n_layer = 6
+dropout = 0.2
+# ------------
 
-# Embedding des tokens + positions
-class GPTEmbedding(nn.Module):
-    def __init__(self, vocab_size, embed_dim, max_seq_len):
+torch.manual_seed(1337)
+
+# wget https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
+with open('input.txt', 'r', encoding='utf-8') as f:
+    text = f.read()
+
+# here are all the unique characters that occur in this text
+chars = sorted(list(set(text)))
+vocab_size = len(chars)
+# create a mapping from characters to integers
+stoi = { ch:i for i,ch in enumerate(chars) }
+itos = { i:ch for i,ch in enumerate(chars) }
+encode = lambda s: [stoi[c] for c in s] # encoder: take a string, output a list of integers
+decode = lambda l: ''.join([itos[i] for i in l]) # decoder: take a list of integers, output a string
+
+# Train and test splits
+data = torch.tensor(encode(text), dtype=torch.long)
+n = int(0.9*len(data)) # first 90% will be train, rest val
+train_data = data[:n]
+val_data = data[n:]
+
+# data loading
+def get_batch(split):
+    # generate a small batch of data of inputs x and targets y
+    data = train_data if split == 'train' else val_data
+    ix = torch.randint(len(data) - block_size, (batch_size,))
+    x = torch.stack([data[i:i+block_size] for i in ix])
+    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
+    x, y = x.to(device), y.to(device)
+    return x, y
+
+@torch.no_grad()
+def estimate_loss():
+    out = {}
+    model.eval()
+    for split in ['train', 'val']:
+        losses = torch.zeros(eval_iters)
+        for k in range(eval_iters):
+            X, Y = get_batch(split)
+            logits, loss = model(X, Y)
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    model.train()
+    return out
+
+class Head(nn.Module):
+    """ one head of self-attention """
+
+    def __init__(self, head_size):
         super().__init__()
-        # TODO: définir token embedding + positional embedding
-        self.embedding_tok = nn.Embedding(vocab_size,embed_dim)
-        self.embedding_pos = nn.Embedding(max_seq_len,embed_dim)
+        self.key = nn.Linear(n_embd, head_size, bias=False)
+        self.query = nn.Linear(n_embd, head_size, bias=False)
+        self.value = nn.Linear(n_embd, head_size, bias=False)
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
 
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        # TODO: renvoyer embeddings + positions
-        batch_size, seq_length = x.size()
-        token_emb = self.embedding_tok(x)
-        pos = torch.arange(seq_length).unsqueeze(0).expand(batch_size, seq_length)
-        token_pos = self.embedding_pos(pos)
-        embeddings = token_emb + token_pos
-        return embeddings
+        # input of size (batch, time-step, channels)
+        # output of size (batch, time-step, head size)
+        B,T,C = x.shape
+        k = self.key(x)   # (B,T,hs)
+        q = self.query(x) # (B,T,hs)
+        # compute attention scores ("affinities")
+        wei = q @ k.transpose(-2,-1) * k.shape[-1]**-0.5 # (B, T, hs) @ (B, hs, T) -> (B, T, T)
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
+        wei = F.softmax(wei, dim=-1) # (B, T, T)
+        wei = self.dropout(wei)
+        # perform the weighted aggregation of the values
+        v = self.value(x) # (B,T,hs)
+        out = wei @ v # (B, T, T) @ (B, T, hs) -> (B, T, hs)
+        return out
 
+class MultiHeadAttention(nn.Module):
+    """ multiple heads of self-attention in parallel """
 
-class SelfAttention(nn.Module):
-    def __init__(self, embed_dim, num_heads):
+    def __init__(self, num_heads, head_size):
         super().__init__()
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(head_size * num_heads, n_embd)
+        self.dropout = nn.Dropout(dropout)
 
-        # Définir les projections
-        self.Q = nn.Linear(embed_dim, embed_dim)
-        self.K = nn.Linear(embed_dim, embed_dim)
-        self.V = nn.Linear(embed_dim, embed_dim)
-        self.out = nn.Linear(embed_dim, embed_dim)
+    def forward(self, x):
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.dropout(self.proj(out))
+        return out
 
-    def forward(self, x, mask=None):
-        B, S, E = x.shape  # batch_size, seq_len, embed_dim
+class FeedFoward(nn.Module):
+    """ a simple linear layer followed by a non-linearity """
 
-        # Projections linéaires
-        Q = self.Q(x)  # [B, S, E]
-        K = self.K(x)
-        V = self.V(x)
-
-        # Split en têtes
-        Q = Q.reshape(B, S, self.num_heads, self.head_dim).permute(0, 2, 1, 3)  # [B, H, S, D]
-        K = K.reshape(B, S, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        V = V.reshape(B, S, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-
-        #calcul
-        scores = Q @ K.transpose(-2, -1) / math.sqrt(self.head_dim)
-        mask = torch.triu(torch.ones(S, S), diagonal=1).bool()  # True pour bloquer
-        scores = scores.masked_fill(mask, float('-inf'))
-        p = F.softmax(scores, dim=-1)
-        output_head = p @ V
-        output = output_head.permute(0, 2, 1, 3).reshape(B, S, E)
-        output = self.out(output)  
-        
-        return output
-
-
-# Bloc Transformer (un bloc de GPT)
-class TransformerBlock(nn.Module):
-    def __init__(self, embed_dim, num_heads, ff_hidden_dim):
+    def __init__(self, n_embd):
         super().__init__()
-        # TODO: attention + layernorm + feedforward + résidu
-        self.attention = SelfAttention(embed_dim, num_heads)
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.norm2 = nn.LayerNorm(embed_dim)
-        self.P_couche = nn.Linear(embed_dim, ff_hidden_dim)
-        self.activation = nn.GELU() 
-        self.D_couche = nn.Linear(ff_hidden_dim, embed_dim)
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, 4 * n_embd),
+            nn.ReLU(),
+            nn.Linear(4 * n_embd, n_embd),
+            nn.Dropout(dropout),
+        )
 
-    def forward(self, x, mask=None):
-        # TODO: forward complet du bloc
-        x_norm1 = self.norm1(x)
-        att_out = self.attention(x_norm1)
-        x = x + att_out
-        x_norm2 = self.norm2(x)
-        ff_out = self.P_couche(x_norm2)     # Linear(embed_dim → ff_hidden_dim)
-        ff_out = self.activation(ff_out)   # GELU
-        ff_out = self.D_couche(ff_out)     # Linear(ff_hidden_dim → embed_dim)
-        x = x + ff_out
+    def forward(self, x):
+        return self.net(x)
+
+class Block(nn.Module):
+    """ Transformer block: communication followed by computation """
+
+    def __init__(self, n_embd, n_head):
+        # n_embd: embedding dimension, n_head: the number of heads we'd like
+        super().__init__()
+        head_size = n_embd // n_head
+        self.sa = MultiHeadAttention(n_head, head_size)
+        self.ffwd = FeedFoward(n_embd)
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
+
+    def forward(self, x):
+        x = x + self.sa(self.ln1(x))
+        x = x + self.ffwd(self.ln2(x))
         return x
 
+class GPTLanguageModel(nn.Module):
 
-# Le modèle complet GPT
-class MiniGPT(nn.Module):
-    def __init__(self, vocab_size, embed_dim, num_heads, ff_hidden_dim, num_layers, max_seq_len):
+    def __init__(self):
         super().__init__()
-        # TODO: embedding, plusieurs blocs transformer, couche finale
-        self.emb = GPTEmbedding(vocab_size, embed_dim, max_seq_len)
-        self.list_trans = nn.ModuleList(
-            [TransformerBlock(embed_dim, num_heads, ff_hidden_dim) for _ in range(num_layers)]
-            )
-        self.proj = nn.Linear(embed_dim, vocab_size)
+        # each token directly reads off the logits for the next token from a lookup table
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
+        self.position_embedding_table = nn.Embedding(block_size, n_embd)
+        self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
+        self.ln_f = nn.LayerNorm(n_embd) # final layer norm
+        self.lm_head = nn.Linear(n_embd, vocab_size)
 
-    def forward(self, x, mask=None):
-        # TODO: appliquer embeddings -> blocs -> projection finale
-        x = self.emb(x)
-        for trans in self.list_trans:
-            x = trans(x, mask=mask)
-        x = self.proj(x)
-        return x
+        # better init, not covered in the original GPT video, but important, will cover in followup video
+        self.apply(self._init_weights)
 
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-def train(model, dataloader, optimizer, criterion, device):
-    model.train()
-    num_epochs = 1  # ou plus
-    for epoch in range(num_epochs):
-        for batch in tqdm(dataloader):
-            inputs, targets = batch
-            # TODO: envoyer sur device
-            inputs = inputs.to(device)
-            targets = targets.to(device)
-            # TODO: forward
-            logits = model(inputs)
-            # TODO: calcul loss
-            loss = criterion(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
-            # TODO: backward + step
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+    def forward(self, idx, targets=None):
+        B, T = idx.shape
 
-def build_dataset(encoded_text, seq_length):
-    inputs = []
-    targets = []
-    for i in range(len(encoded_text) - seq_length):
-        x = encoded_text[i : i + seq_length]
-        y = encoded_text[i+1 : i + seq_length + 1]  # décalé d’un cran
-        inputs.append(x)
-        targets.append(y)
-    # Convertir en tenseurs
-    X = torch.tensor(inputs, dtype=torch.long)
-    Y = torch.tensor(targets, dtype=torch.long)
-    return X, Y
+        # idx and targets are both (B,T) tensor of integers
+        tok_emb = self.token_embedding_table(idx) # (B,T,C)
+        pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
+        x = tok_emb + pos_emb # (B,T,C)
+        x = self.blocks(x) # (B,T,C)
+        x = self.ln_f(x) # (B,T,C)
+        logits = self.lm_head(x) # (B,T,vocab_size)
 
-def generate(model, start_tokens, max_new_tokens, char2idx, idx2char, device, temperature=0.7):
-    """
-    Génère du texte à partir d'un prompt initial.
-    """
-    # 1. Mettre start_tokens dans un tenseur sur le bon device
-    input = start_tokens.to(device)
-    # 2. Boucle de génération
-    for _ in range(max_new_tokens):
-        # a. Passer input dans le modèle → logits
-        logits = model(input)
-        # b. Prendre seulement les logits du dernier token
-        logits = logits[:, -1, :]
-        # c. Appliquer la température
-        logits = logits/temperature
-        # d. Calculer probabilités avec softmax
-        probs = F.softmax(logits, dim=-1)
-        # e. Échantillonner un token (ou argmax)
-        next_token = torch.multinomial(probs, 1)
-        # f. Ajouter ce token à la séquence
-        input = torch.cat([input, next_token], dim=1)
-    # 3. Décoder la séquence complète en texte
-    output_text = "".join([idx2char[int(i)] for i in input[0]])
-    return output_text
+        if targets is None:
+            loss = None
+        else:
+            B, T, C = logits.shape
+            logits = logits.view(B*T, C)
+            targets = targets.view(B*T)
+            loss = F.cross_entropy(logits, targets)
 
+        return logits, loss
 
-text = open("input.txt").read()[:100000]
-vocab = sorted(set(text))
-char2idx = {ch: i for i, ch in enumerate(vocab)}
-idx2char = {i: ch for i, ch in enumerate(vocab)}
+    def generate(self, idx, max_new_tokens):
+        # idx is (B, T) array of indices in the current context
+        for _ in range(max_new_tokens):
+            # crop idx to the last block_size tokens
+            idx_cond = idx[:, -block_size:]
+            # get the predictions
+            logits, loss = self(idx_cond)
+            # focus only on the last time step
+            logits = logits[:, -1, :] # becomes (B, C)
+            # apply softmax to get probabilities
+            probs = F.softmax(logits, dim=-1) # (B, C)
+            # sample from the distribution
+            idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
+            # append sampled index to the running sequence
+            idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
+        return idx
 
-encoded = [char2idx[c] for c in text]
+model = GPTLanguageModel()
+m = model.to(device)
+# print the number of parameters in the model
+print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
 
-X, Y = build_dataset(encoded, seq_length=3)
+# create a PyTorch optimizer
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-vocab_size = len(vocab)
-embed_dim = 8
-num_heads = 2
-ff_hidden_dim = 32
-num_layers = 1
-max_seq_len = 32
+for iter in range(max_iters):
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Training on:", device)
-model = MiniGPT(vocab_size, embed_dim, num_heads, ff_hidden_dim, num_layers, max_seq_len)
-model.to(device)
+    # every once in a while evaluate the loss on train and val sets
+    if iter % eval_interval == 0 or iter == max_iters - 1:
+        losses = estimate_loss()
+        print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
-batch_size = 2
-seq_len = max_seq_len
-num_batches = 5
+    # sample a batch of data
+    xb, yb = get_batch('train')
 
-dataset = torch.utils.data.TensorDataset(X, Y)
-dataloader = torch.utils.data.DataLoader(dataset, batch_size=2, shuffle=True)
+    # evaluate the loss
+    logits, loss = model(xb, yb)
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
 
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-criterion = nn.CrossEntropyLoss()
-
-train(model, dataloader, optimizer, criterion, device)
-
-logits = model(X)
-print(logits.shape)  # doit afficher [2, 10, 50]
-
-loss = criterion(logits.view(-1, vocab_size), Y.view(-1))
-perplexity = torch.exp(loss)
-
-encoded = [char2idx[c] for c in "hello"]
-
-start_tokens = torch.tensor([encoded], dtype=torch.long)
-
-text =generate(model, start_tokens, 5, char2idx, idx2char, device, temperature=1.3)
-print(loss)
-print(perplexity)
-print(text)
+# generate from the model
+context = torch.zeros((1, 1), dtype=torch.long, device=device)
+print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
+#open('more.txt', 'w').write(decode(m.generate(context, max_new_tokens=10000)[0].tolist()))
