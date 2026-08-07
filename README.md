@@ -38,8 +38,8 @@ This repository is three folders, read in order: [`neuronne/`](neuronne/) derive
 | 5 | Neural baseline | [`gpt/bigram.py`](gpt/bigram.py) | `Embedding(65, 65)` | 4,225 | ✅ measured — full 1.1M-char corpus |
 | 6 | Karpathy reference implementation | [`gpt/pytorch_cpu.py`](gpt/pytorch_cpu.py) | 6 blocks, 6 heads, d=384 | 10,788,929 | ✅ measured — best val loss 1.49 |
 | 7 | Independent Transformer rewrite | [`gpt/deuxieme_gpt.py`](gpt/deuxieme_gpt.py) | 6 blocks, 6 heads, d=384 | 10,715,201 | 📎 implemented, not trained here |
-| 8 | **MiniGPT** (trainer: [`pytorch_gpu.py`](gpt/pytorch_gpu.py), demo: [`chat_bot.py`](gpt/chat_bot.py)) | 4 blocks, 8 heads, d=256 | **2,141,952** | ✅ measured — held-out val loss 1.09 |
-| 9 | **Camille0** ([`camille0/`](camille0/)) | 6 blocks, 6 heads, d=384, GPT-2 BPE | **47,125,585** | ✅ measured — trained on SlimPajama-6B |
+| 8 | **MiniGPT** |(trainer: [`pytorch_gpu.py`](gpt/pytorch_gpu.py), demo: [`chat_bot.py`](gpt/chat_bot.py)) | 4 blocks, 8 heads, d=256 | **2,141,952** | ✅ measured — held-out val loss 1.09 |
+| 9 | **Camille0** |([`camille0/`](camille0/)) | 6 blocks, 6 heads, d=384, GPT-2 BPE | **47,125,585** | ✅ measured — trained on SlimPajama-6B |
 
 All parameter counts were computed by instantiating each real class from the actual files and calling `sum(p.numel() for p in model.parameters())` — not estimated by hand.
 
