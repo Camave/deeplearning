@@ -12,9 +12,9 @@ def initialize_weights(dimension):
     c = len(dimension)
     
     for i in range(1, c):
-        W= np.random.rand(dimension[i], dimension[i-1]) * np.sqrt(2/dimension[i-1])
-        b = np.random.randn(dimension[i], 1)
-        parameters['W' + str(i)] = W 
+        W = np.random.randn(dimension[i], dimension[i-1]) * np.sqrt(2/dimension[i-1])
+        b = np.zeros((dimension[i], 1))
+        parameters['W' + str(i)] = W
         parameters['b' + str(i)] = b
 
     return parameters
@@ -140,7 +140,7 @@ y_train, y_test = y_train.T, y_test.T  # Correction ici
 
 # Entraînement
 dim = (64,32)
-params = neurol_network(X_train, y_train, dim, a=0.1, epochs=12000)
+params = neurol_network(X_train, y_train, dim, a=0.1, epochs=2000)
 
 # Test
 y_pred = Predict(X_test, params)
